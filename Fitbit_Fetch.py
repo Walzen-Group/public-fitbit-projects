@@ -2,22 +2,17 @@
 import base64, requests, schedule, time, json, pytz, logging, os
 from requests.exceptions import ConnectionError
 from datetime import datetime, timedelta
-from influxdb import InfluxDBClient
-from influxdb.exceptions import InfluxDBClientError
-
-# %% [markdown]
-# ## Variables
-
+# from influxdb import InfluxDBClient
+# from influxdb.exceptions import InfluxDBClientError
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.exceptions import InfluxDBError
+from influxdb_client.client.write_api import SYNCHRONOUS
 # %%
 FITBIT_LOG_FILE_PATH = os.environ.get("FITBIT_LOG_FILE_PATH") or "your/expected/log/file/location/path"
 TOKEN_FILE_PATH = os.environ.get("TOKEN_FILE_PATH") or "your/expected/token/file/location/path"
 OVERWRITE_LOG_FILE = True
 FITBIT_LANGUAGE = 'en_US'
-INFLUXDB_HOST = os.environ.get("INFLUXDB_HOST") or 'localhost'
-INFLUXDB_PORT = os.environ.get("INFLUXDB_PORT") or 8086
-INFLUXDB_USERNAME = os.environ.get("INFLUXDB_USERNAME") or 'your_influxdb_username'
-INFLUXDB_PASSWORD = os.environ.get("INFLUXDB_PASSWORD") or 'your_influxdb_password'
-INFLUXDB_DATABASE = os.environ.get("INFLUXDB_DATABASE") or 'your_influxdb_database_name'
+INFLUXDB_BUCKET = os.environ.get("INFLUXDB_V2_BUCKET") or 'your_influxdb_bucket_name'
 # MAKE SURE you set the application type to PERSONAL. Otherwise, you won't have access to intraday data series, resulting in 40X errors.
 client_id = os.environ.get("CLIENT_ID") or "your_application_client_ID" # Change this to your client ID
 client_secret = os.environ.get("CLIENT_SECRET") or "your_application_client_secret" # Change this to your client Secret
@@ -157,19 +152,27 @@ ACCESS_TOKEN = Get_New_Access_Token(client_id, client_secret)
 
 # %%
 try:
-    influxdbclient = InfluxDBClient(host=INFLUXDB_HOST, port=INFLUXDB_PORT, username=INFLUXDB_USERNAME, password=INFLUXDB_PASSWORD)
-    influxdbclient.switch_database(INFLUXDB_DATABASE)
-except InfluxDBClientError as err:
-    logging.error("Unable to connect with influxdb database! Aborted")
-    raise InfluxDBClientError("InfluxDB connection failed:" + str(err))
+    influxdbclient = InfluxDBClient.from_env_properties()
+    write_api = influxdbclient.write_api(write_options=SYNCHRONOUS)
+except InfluxDBError as e:
+    logging.error("InfluxDB Error : " + str(e))
 
-def write_points_to_influxdb(points):
+health = influxdbclient.health()
+
+if health.status == "pass":
+    logging.info("Connected successfully to InfluxDB!")
+else:
+    logging.error("Failed to connect to InfluxDB!")
+
+def write_points_to_influxdb(points: list[Point]):
+    logging.info(f"Updating InfluxDB database with {len(points)} points")
     try:
-        influxdbclient.write_points(points)
-        logging.info("Successfully updated influxdb database with new points")
-    except InfluxDBClientError as err:
-        logging.error("Unable to connect with influxdb database! " + str(err))
-        print("Influxdb connection failed! ", str(err))
+        # write in chunks of 1000 points
+        for i in range(0, len(points), 1000):
+            write_api.write(bucket=INFLUXDB_BUCKET, org=os.environ.get("INFLUXDB_V2_ORG"), record=points[i:i+1000])
+        logging.info("Successfully updated InfluxDB database with new points")
+    except InfluxDBError as e:
+        logging.error("InfluxDB Error : " + str(e))
 
 # %% [markdown]
 # ## Selecting Dates for update
@@ -203,13 +206,14 @@ def update_working_dates():
 def get_battery_level():
     device = request_data_from_fitbit("https://api.fitbit.com/1/user/-/devices.json")[0]
     if device != None:
-        collected_records.append({
+        dictionary = {
             "measurement": "DeviceBatteryLevel",
             "time": LOCAL_TIMEZONE.localize(datetime.fromisoformat(device['lastSyncTime'])).astimezone(pytz.utc).isoformat(),
             "fields": {
                 "value": float(device['batteryLevel'])
             }
-        })
+        }
+        collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded battery level for " + DEVICENAME)
     else:
         logging.error("Recording battery level failed : " + DEVICENAME)
@@ -222,7 +226,7 @@ def get_intraday_data_limit_1d(date_str, measurement_list):
             for value in data:
                 log_time = datetime.fromisoformat(date_str + "T" + value['time'])
                 utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-                collected_records.append({
+                dictionary = {
                         "measurement":  measurement[1],
                         "time": utc_time,
                         "tags": {
@@ -231,7 +235,8 @@ def get_intraday_data_limit_1d(date_str, measurement_list):
                         "fields": {
                             "value": int(value['value'])
                         }
-                    })
+                    }
+                collected_records.append(Point.from_dict(dictionary))
             logging.info("Recorded " +  measurement[1] + " intraday for date " + date_str)
         else:
             logging.error("Recording failed : " +  measurement[1] + " intraday for date " + date_str)
@@ -244,7 +249,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         for data in hrv_data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                     "measurement":  "HRV",
                     "time": utc_time,
                     "tags": {
@@ -254,7 +259,8 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                         "dailyRmssd": data["value"]["dailyRmssd"],
                         "deepRmssd": data["value"]["deepRmssd"]
                     }
-                })
+                }
+            collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded HRV for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed HRV for date " + start_date_str + " to " + end_date_str)
@@ -264,7 +270,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         for data in br_data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                     "measurement":  "BreathingRate",
                     "time": utc_time,
                     "tags": {
@@ -273,7 +279,8 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                     "fields": {
                         "value": data["value"]["breathingRate"]
                     }
-                })
+                }
+            collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded BR for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : BR for date " + start_date_str + " to " + end_date_str)
@@ -283,7 +290,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         for temp_record in skin_temp_data_list:
             log_time = datetime.fromisoformat(temp_record["dateTime"] + "T" + "00:00:00")
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                     "measurement":  "Skin Temperature Variation",
                     "time": utc_time,
                     "tags": {
@@ -292,7 +299,8 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                     "fields": {
                         "RelativeValue": temp_record["value"]["nightlyRelative"]
                     }
-                })
+                }
+            collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
@@ -304,7 +312,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
             for record in data: 
                 log_time = datetime.fromisoformat(record["minute"])
                 utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-                collected_records.append({
+                dictionary = {
                         "measurement":  "SPO2_Intraday",
                         "time": utc_time,
                         "tags": {
@@ -313,7 +321,8 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                         "fields": {
                             "value": float(record["value"]),
                         }
-                    })
+                    }
+                collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded SPO2 intraday for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : SPO2 intraday for date " + start_date_str + " to " + end_date_str)
@@ -335,7 +344,7 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                 minutesREM = record['levels']['summary']['restless']['minutes']
                 minutesDeep = 0
 
-            collected_records.append({
+            dictionary = {
                     "measurement":  "Sleep Summary",
                     "time": utc_time,
                     "tags": {
@@ -353,13 +362,14 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                         'minutesREM': minutesREM,
                         'minutesDeep': minutesDeep
                     }
-                })
+                }
+            collected_records.append(Point.from_dict(dictionary))
             
             sleep_level_mapping = {'wake': 3, 'rem': 2, 'light': 1, 'deep': 0, 'asleep': 1, 'restless': 2, 'awake': 3}
             for sleep_stage in record['levels']['data']:
                 log_time = datetime.fromisoformat(sleep_stage["dateTime"])
                 utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-                collected_records.append({
+                dictionary = {
                         "measurement":  "Sleep Levels",
                         "time": utc_time,
                         "tags": {
@@ -370,10 +380,11 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                             'level': sleep_level_mapping[sleep_stage["level"]],
                             'duration_seconds': sleep_stage["seconds"]
                         }
-                    })
+                    }
+                collected_records.append(Point.from_dict(dictionary))
             wake_time = datetime.fromisoformat(record["endTime"])
             utc_wake_time = LOCAL_TIMEZONE.localize(wake_time).astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                         "measurement":  "Sleep Levels",
                         "time": utc_wake_time,
                         "tags": {
@@ -384,7 +395,8 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                             'level': sleep_level_mapping['wake'],
                             'duration_seconds': None
                         }
-                    })
+                    }
+            collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded Sleep data for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : Sleep data for date " + start_date_str + " to " + end_date_str)
@@ -398,7 +410,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
             for data in activity_minutes_data_list:
                 log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
                 utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-                collected_records.append({
+                dictionary = {
                         "measurement": "Activity Minutes",
                         "time": utc_time,
                         "tags": {
@@ -407,7 +419,8 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         "fields": {
                             activity_type : int(data["value"])
                         }
-                    })
+                    }
+                collected_records.append(Point.from_dict(dictionary))
             logging.info("Recorded " + activity_type + "for date " + start_date_str + " to " + end_date_str)
         else:
             logging.error("Recording failed : " + activity_type + " for date " + start_date_str + " to " + end_date_str)
@@ -421,7 +434,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                 log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
                 utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
                 activity_name = "Total Steps" if activity_type == "steps" else activity_type
-                collected_records.append({
+                dictionary = {
                         "measurement": activity_name,
                         "time": utc_time,
                         "tags": {
@@ -430,7 +443,8 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         "fields": {
                             "value" : float(data["value"])
                         }
-                    })
+                    }
+                collected_records.append(Point.from_dict(dictionary))
             logging.info("Recorded " + activity_name + " for date " + start_date_str + " to " + end_date_str)
         else:
             logging.error("Recording failed : " + activity_name + " for date " + start_date_str + " to " + end_date_str)
@@ -441,7 +455,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
         for data in HR_zones_data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                     "measurement": "HR zones",
                     "time": utc_time,
                     "tags": {
@@ -453,9 +467,10 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         "Cardio" :  data["value"]["heartRateZones"][2]["minutes"],
                         "Peak" :  data["value"]["heartRateZones"][3]["minutes"]
                     }
-                })
+                }
+            collected_records.append(Point.from_dict(dictionary))
             if "restingHeartRate" in data["value"]:
-                collected_records.append({
+                dictionary = {
                             "measurement":  "RestingHR",
                             "time": utc_time,
                             "tags": {
@@ -464,7 +479,8 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                             "fields": {
                                 "value": data["value"]["restingHeartRate"]
                             }
-                        })
+                        }
+                collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded RHR and HR zones for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : RHR and HR zones for date " + start_date_str + " to " + end_date_str)
@@ -476,7 +492,7 @@ def get_daily_data_limit_none(start_date_str, end_date_str):
         for data in data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                     "measurement":  "SPO2",
                     "time": utc_time,
                     "tags": {
@@ -487,7 +503,8 @@ def get_daily_data_limit_none(start_date_str, end_date_str):
                         "max": data["value"]["max"],
                         "min": data["value"]["min"]
                     }
-                })
+                }
+            collected_records.append(Point.from_dict(dictionary))
         logging.info("Recorded Avg SPO2 for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : Avg SPO2 for date " + start_date_str + " to " + end_date_str)
@@ -512,14 +529,15 @@ def fetch_latest_activities(end_date_str):
                 fields['steps'] = int(activity['steps'])
             starttime = datetime.fromisoformat(activity['startTime'].strip("Z"))
             utc_time = starttime.astimezone(pytz.utc).isoformat()
-            collected_records.append({
+            dictionary = {
                 "measurement": "Activity Records",
                 "time": utc_time,
                 "tags": {
                     "ActivityName": activity['activityName']
                 },
                 "fields": fields
-            })
+            }
+            collected_records.append(Point.from_dict(dictionary))
         logging.info("Fetched 50 recent activities before date " + end_date_str)
     else:
         logging.error("Fetching 50 recent activities failed : before date " + end_date_str)
