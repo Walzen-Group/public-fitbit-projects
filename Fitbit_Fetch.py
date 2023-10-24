@@ -142,7 +142,11 @@ def Get_New_Access_Token(client_id, client_secret):
     try:
         access_token, refresh_token = load_tokens_from_file()
     except FileNotFoundError:
-        refresh_token = input("No token file found. Please enter a valid refresh token : ")
+        if os.environ.get("REFRESH_TOKEN") is None:
+            refresh_token = input("No token file found. Please enter a valid refresh token : ")
+        else:
+            refresh_token = os.environ.get("REFRESH_TOKEN")
+            os.environ.pop("REFRESH_TOKEN")
     access_token, refresh_token = refresh_fitbit_tokens(client_id, client_secret, refresh_token)
     return access_token
 
