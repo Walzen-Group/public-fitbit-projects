@@ -33,12 +33,19 @@ SKIP_REQUEST_ON_SERVER_ERROR = True
 if OVERWRITE_LOG_FILE:
     with open(FITBIT_LOG_FILE_PATH, "w"): pass
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    filename=FITBIT_LOG_FILE_PATH,
-    filemode="a"
-)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+file_handler = logging.FileHandler(FITBIT_LOG_FILE_PATH)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 # %% [markdown]
 # ## Setting up base API Caller function
