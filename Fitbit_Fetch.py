@@ -30,13 +30,14 @@ SKIP_REQUEST_ON_SERVER_ERROR = True
 # ## Logging setup
 
 # %%
-if OVERWRITE_LOG_FILE:
-    with open(FITBIT_LOG_FILE_PATH, "w"): pass
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-file_handler = logging.FileHandler(FITBIT_LOG_FILE_PATH)
+if OVERWRITE_LOG_FILE:
+    file_handler = logging.FileHandler(FITBIT_LOG_FILE_PATH, mode='w')
+else:
+    file_handler = logging.FileHandler(FITBIT_LOG_FILE_PATH, mode='a')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
@@ -55,7 +56,7 @@ logger.addHandler(console_handler)
 def request_data_from_fitbit(url, headers={}, params={}, data={}, request_type="get"):
     global ACCESS_TOKEN
     retry_attempts = 0
-    logging.debug("Requesting data from fitbit via Url : " + url)
+    logger.debug("Requesting data from fitbit via Url : " + url)
     while True: # Unlimited Retry attempts
         if request_type == "get":
             headers = {
@@ -75,35 +76,35 @@ def request_data_from_fitbit(url, headers={}, params={}, data={}, request_type="
                 return response.json()
             elif response.status_code == 429: # API Limit reached
                 retry_after = int(response.headers["Retry-After"]) + 300
-                logging.warning("Fitbit API limit reached. Error code : " + str(response.status_code) + ", Retrying in " + str(retry_after) + " seconds")
+                logger.warning("Fitbit API limit reached. Error code : " + str(response.status_code) + ", Retrying in " + str(retry_after) + " seconds")
                 print("Fitbit API limit reached. Error code : " + str(response.status_code) + ", Retrying in " + str(retry_after) + " seconds")
                 time.sleep(retry_after)
             elif response.status_code == 401: # Access token expired ( most likely )
-                logging.info("Current Access Token : " + ACCESS_TOKEN)
-                logging.warning("Error code : " + str(response.status_code) + ", Details : " + response.text)
+                logger.info("Current Access Token : " + ACCESS_TOKEN)
+                logger.warning("Error code : " + str(response.status_code) + ", Details : " + response.text)
                 print("Error code : " + str(response.status_code) + ", Details : " + response.text)
                 ACCESS_TOKEN = Get_New_Access_Token(client_id, client_secret)
-                logging.info("New Access Token : " + ACCESS_TOKEN)
+                logger.info("New Access Token : " + ACCESS_TOKEN)
                 time.sleep(30)
                 if retry_attempts > EXPIRED_TOKEN_MAX_RETRY:
-                    logging.error("Unable to solve the 401 Error. Please debug - " + response.text)
+                    logger.error("Unable to solve the 401 Error. Please debug - " + response.text)
                     raise Exception("Unable to solve the 401 Error. Please debug - " + response.text)
             elif response.status_code in [500, 502, 503, 504]: # Fitbit server is down or not responding ( most likely ):
-                logging.warning("Server Error encountered ( Code 5xx ): Retrying after 120 seconds....")
+                logger.warning("Server Error encountered ( Code 5xx ): Retrying after 120 seconds....")
                 time.sleep(120)
                 if retry_attempts > SERVER_ERROR_MAX_RETRY:
-                    logging.error("Unable to solve the server Error. Retry limit exceed. Please debug - " + response.text)
+                    logger.error("Unable to solve the server Error. Retry limit exceed. Please debug - " + response.text)
                     if SKIP_REQUEST_ON_SERVER_ERROR:
-                        logging.warning("Retry limit reached for server error : Skipping request -> " + url)
+                        logger.warning("Retry limit reached for server error : Skipping request -> " + url)
                         return None
             else:
-                logging.error("Fitbit API request failed. Status code: " + str(response.status_code) + " " + str(response.text) )
+                logger.error("Fitbit API request failed. Status code: " + str(response.status_code) + " " + str(response.text) )
                 print(f"Fitbit API request failed. Status code: {response.status_code}", response.text)
                 response.raise_for_status()
                 return None
 
         except ConnectionError as e:
-            logging.error("Retrying in 5 minutes - Failed to connect to internet : " + str(e))
+            logger.error("Retrying in 5 minutes - Failed to connect to internet : " + str(e))
             print("Retrying in 5 minutes - Failed to connect to internet : " + str(e))
         retry_attempts += 1
         time.sleep(30)
@@ -113,7 +114,7 @@ def request_data_from_fitbit(url, headers={}, params={}, data={}, request_type="
 
 # %%
 def refresh_fitbit_tokens(client_id, client_secret, refresh_token):
-    logging.info("Attempting to refresh tokens...")
+    logger.info("Attempting to refresh tokens...")
     url = "https://api.fitbit.com/oauth2/token"
     headers = {
         "Authorization": "Basic " + base64.b64encode((client_id + ":" + client_secret).encode()).decode(),
@@ -132,7 +133,7 @@ def refresh_fitbit_tokens(client_id, client_secret, refresh_token):
     }
     with open(TOKEN_FILE_PATH, "w") as file:
         json.dump(tokens, file)
-    logging.info("Fitbit token refresh successful!")
+    logger.info("Fitbit token refresh successful!")
     return access_token, new_refresh_token
 
 def load_tokens_from_file():
@@ -162,24 +163,24 @@ try:
     influxdbclient = InfluxDBClient.from_env_properties()
     write_api = influxdbclient.write_api(write_options=SYNCHRONOUS)
 except InfluxDBError as e:
-    logging.error("InfluxDB Error : " + str(e))
+    logger.error("InfluxDB Error : " + str(e))
 
 health = influxdbclient.health()
 
 if health.status == "pass":
-    logging.info("Connected successfully to InfluxDB!")
+    logger.info("Connected successfully to InfluxDB!")
 else:
-    logging.error("Failed to connect to InfluxDB!")
+    logger.error("Failed to connect to InfluxDB!")
 
 def write_points_to_influxdb(points: list[Point]):
-    logging.info(f"Updating InfluxDB database with {len(points)} points")
+    logger.info(f"Updating InfluxDB database with {len(points)} points")
     try:
         # write in chunks of 1000 points
         for i in range(0, len(points), 1000):
             write_api.write(bucket=INFLUXDB_BUCKET, org=os.environ.get("INFLUXDB_V2_ORG"), record=points[i:i+1000])
-        logging.info("Successfully updated InfluxDB database with new points")
+        logger.info("Successfully updated InfluxDB database with new points")
     except InfluxDBError as e:
-        logging.error("InfluxDB Error : " + str(e))
+        logger.error("InfluxDB Error : " + str(e))
 
 # %% [markdown]
 # ## Selecting Dates for update
@@ -221,9 +222,9 @@ def get_battery_level():
             }
         }
         collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded battery level for " + DEVICENAME)
+        logger.info("Recorded battery level for " + DEVICENAME)
     else:
-        logging.error("Recording battery level failed : " + DEVICENAME)
+        logger.error("Recording battery level failed : " + DEVICENAME)
 
 # For intraday detailed data, max possible range in one day. 
 def get_intraday_data_limit_1d(date_str, measurement_list):
@@ -244,9 +245,9 @@ def get_intraday_data_limit_1d(date_str, measurement_list):
                         }
                     }
                 collected_records.append(Point.from_dict(dictionary))
-            logging.info("Recorded " +  measurement[1] + " intraday for date " + date_str)
+            logger.info("Recorded " +  measurement[1] + " intraday for date " + date_str)
         else:
-            logging.error("Recording failed : " +  measurement[1] + " intraday for date " + date_str)
+            logger.error("Recording failed : " +  measurement[1] + " intraday for date " + date_str)
 
 # Max range is 30 days, records BR, SPO2 Intraday, skin temp and HRV - 4 queries
 def get_daily_data_limit_30d(start_date_str, end_date_str):
@@ -268,9 +269,9 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                     }
                 }
             collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded HRV for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded HRV for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed HRV for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed HRV for date " + start_date_str + " to " + end_date_str)
 
     br_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/br/date/' + start_date_str + '/' + end_date_str + '.json')["br"]
     if br_data_list != None:
@@ -288,9 +289,9 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                     }
                 }
             collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded BR for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded BR for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed : BR for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed : BR for date " + start_date_str + " to " + end_date_str)
 
     skin_temp_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/temp/skin/date/' + start_date_str + '/' + end_date_str + '.json')["tempSkin"]
     if skin_temp_data_list != None:
@@ -308,9 +309,9 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                     }
                 }
             collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed : Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed : Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
 
     spo2_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/spo2/date/' + start_date_str + '/' + end_date_str + '/all.json')
     if spo2_data_list != None:
@@ -330,9 +331,9 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                         }
                     }
                 collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded SPO2 intraday for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded SPO2 intraday for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed : SPO2 intraday for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed : SPO2 intraday for date " + start_date_str + " to " + end_date_str)
 
 # Only for sleep data - limit 100 days - 1 query
 def get_daily_data_limit_100d(start_date_str, end_date_str):
@@ -404,9 +405,9 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                         }
                     }
             collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded Sleep data for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded Sleep data for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed : Sleep data for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed : Sleep data for date " + start_date_str + " to " + end_date_str)
 
 # Max date range 1 year, records HR zones, Activity minutes and Resting HR - 4 + 3 + 1 + 1 = 9 queries
 def get_daily_data_limit_365d(start_date_str, end_date_str):
@@ -428,9 +429,9 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         }
                     }
                 collected_records.append(Point.from_dict(dictionary))
-            logging.info("Recorded " + activity_type + "for date " + start_date_str + " to " + end_date_str)
+            logger.info("Recorded " + activity_type + "for date " + start_date_str + " to " + end_date_str)
         else:
-            logging.error("Recording failed : " + activity_type + " for date " + start_date_str + " to " + end_date_str)
+            logger.error("Recording failed : " + activity_type + " for date " + start_date_str + " to " + end_date_str)
         
 
     activity_others_list = ["distance", "calories", "steps"]
@@ -452,9 +453,9 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         }
                     }
                 collected_records.append(Point.from_dict(dictionary))
-            logging.info("Recorded " + activity_name + " for date " + start_date_str + " to " + end_date_str)
+            logger.info("Recorded " + activity_name + " for date " + start_date_str + " to " + end_date_str)
         else:
-            logging.error("Recording failed : " + activity_name + " for date " + start_date_str + " to " + end_date_str)
+            logger.error("Recording failed : " + activity_name + " for date " + start_date_str + " to " + end_date_str)
         
 
     HR_zones_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/activities/heart/date/' + start_date_str + '/' + end_date_str + '.json')["activities-heart"]
@@ -488,9 +489,9 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                             }
                         }
                 collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded RHR and HR zones for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded RHR and HR zones for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed : RHR and HR zones for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed : RHR and HR zones for date " + start_date_str + " to " + end_date_str)
 
 # records SPO2 single days for the whole given period - 1 query
 def get_daily_data_limit_none(start_date_str, end_date_str):
@@ -512,9 +513,9 @@ def get_daily_data_limit_none(start_date_str, end_date_str):
                     }
                 }
             collected_records.append(Point.from_dict(dictionary))
-        logging.info("Recorded Avg SPO2 for date " + start_date_str + " to " + end_date_str)
+        logger.info("Recorded Avg SPO2 for date " + start_date_str + " to " + end_date_str)
     else:
-        logging.error("Recording failed : Avg SPO2 for date " + start_date_str + " to " + end_date_str)
+        logger.error("Recording failed : Avg SPO2 for date " + start_date_str + " to " + end_date_str)
 
 # Fetches latest activities from record ( upto last 100 )
 def fetch_latest_activities(end_date_str):
@@ -545,9 +546,9 @@ def fetch_latest_activities(end_date_str):
                 "fields": fields
             }
             collected_records.append(Point.from_dict(dictionary))
-        logging.info("Fetched 50 recent activities before date " + end_date_str)
+        logger.info("Fetched 50 recent activities before date " + end_date_str)
     else:
-        logging.error("Fetching 50 recent activities failed : before date " + end_date_str)
+        logger.error("Fetching 50 recent activities failed : before date " + end_date_str)
 
 
 # %% [markdown]
@@ -566,7 +567,7 @@ else:
 if AUTO_DATE_RANGE:
     date_list = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end_date - start_date).days + 1)]
     if len(date_list) > 3:
-        logging.warn("Auto schedule update is not meant for more than 3 days at a time, please consider lowering the auto_update_date_range variable to aviod rate limit hit!")
+        logger.warn("Auto schedule update is not meant for more than 3 days at a time, please consider lowering the auto_update_date_range variable to aviod rate limit hit!")
     for date_str in date_list:
         get_intraday_data_limit_1d(date_str, [('heart','HeartRate_Intraday','1sec'),('steps','Steps_Intraday','1min')]) # 2 queries x number of dates ( default 2)
     get_daily_data_limit_30d(start_date_str, end_date_str) # 3 queries
@@ -614,7 +615,7 @@ else:
     for single_day in date_list:
         do_bulk_update(get_intraday_data_limit_1d, single_day, [('heart','HeartRate_Intraday','1sec'),('steps','Steps_Intraday','1min')])
 
-    logging.info("Success : Bulk update complete for " + start_date_str + " to " + end_date_str)
+    logger.info("Success : Bulk update complete for " + start_date_str + " to " + end_date_str)
     print("Bulk update complete!")
 
 # %% [markdown]
